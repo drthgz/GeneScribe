@@ -25,7 +25,7 @@ except ImportError:
 
 try:
     import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
     _TRANSFORMERS_AVAILABLE = True
 except ImportError:
     _TRANSFORMERS_AVAILABLE = False
@@ -157,6 +157,9 @@ class GemmaClient:
         Path("/kaggle/input/gemma-4"),
         Path("/kaggle/input/gemma_4"),
         Path("/kaggle/input/google-gemma-4"),
+        Path.cwd() / "kaggle" / "input" / "gemma-4",
+        Path.cwd() / "kaggle" / "input" / "gemma_4",
+        Path.cwd() / "kaggle" / "input" / "google-gemma-4",
     ]
 
     def __init__(
@@ -172,6 +175,7 @@ class GemmaClient:
         self.temperature = temperature
         self.max_retries = max_retries
         self._model: Any = None
+        self._processor: Any = None
         self._tokenizer: Any = None
         self._mode: str = "mock"
 
@@ -225,38 +229,71 @@ class GemmaClient:
     @staticmethod
     def _find_local_model(custom_path: str | None = None) -> Path | None:
         """Discover local Gemma 4 model in Kaggle Inputs or custom path."""
+        def _resolve_model_dir(base: Path) -> Path | None:
+            if (base / "config.json").exists():
+                return base
+            # Kaggle model downloads are often nested 1-3 levels below the input root.
+            for config in base.rglob("config.json"):
+                candidate = config.parent
+                if (candidate / "generation_config.json").exists() or any(
+                    candidate.glob("*.safetensors")
+                ):
+                    return candidate
+            return None
+
         if custom_path:
             p = Path(custom_path)
-            if p.exists() and (p / "config.json").exists():
-                return p
+            if p.exists():
+                found = _resolve_model_dir(p)
+                if found:
+                    return found
         for kaggle_path in GemmaClient.KAGGLE_INPUT_PATHS:
             if kaggle_path.exists():
-                config_file = kaggle_path / "config.json"
-                if config_file.exists():
-                    return kaggle_path
+                found = _resolve_model_dir(kaggle_path)
+                if found:
+                    return found
         env_path = os.environ.get("GENESCRIBE_MODEL_PATH", "").strip()
         if env_path:
             p = Path(env_path)
-            if p.exists() and (p / "config.json").exists():
-                return p
+            if p.exists():
+                found = _resolve_model_dir(p)
+                if found:
+                    return found
         return None
 
     def _load_local_model(self, model_path: Path) -> None:
         """Load Gemma 4 locally using transformers."""
         if not _TRANSFORMERS_AVAILABLE:
             raise RuntimeError("transformers library not installed. Run: pip install transformers torch")
-        
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[GemmaClient] Loading model on {device}...")
-        
-        self._tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+
+        has_cuda = torch.cuda.is_available()
+        dtype = torch.bfloat16 if has_cuda else torch.float32
+        print(f"[GemmaClient] Loading model on {'cuda' if has_cuda else 'cpu'}...")
+
+        if not has_cuda:
+            weight_bytes = sum(f.stat().st_size for f in model_path.glob("*.safetensors"))
+            if weight_bytes > 3_000_000_000:
+                raise RuntimeError(
+                    "Local Gemma weights are too large for CPU-only runtime. "
+                    "Use a GPU-enabled environment (Kaggle) or a smaller variant."
+                )
+
+        try:
+            self._processor = AutoProcessor.from_pretrained(str(model_path))
+            self._tokenizer = self._processor.tokenizer
+        except Exception:
+            self._processor = None
+            self._tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+
         self._model = AutoModelForCausalLM.from_pretrained(
             str(model_path),
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map=device,
+            torch_dtype=dtype,
+            device_map="auto" if has_cuda else None,
             low_cpu_mem_usage=True,
         )
-        print(f"[GemmaClient] Model loaded successfully on {device}")
+        if not has_cuda:
+            self._model = self._model.to("cpu")
+        print("[GemmaClient] Model loaded successfully")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -358,17 +395,33 @@ class GemmaClient:
     def _generate_local(self, prompt: str) -> str:
         """Generate response using local model."""
         try:
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+            if self._processor is not None:
+                messages = [
+                    {"role": "system", "content": _SYSTEM_CONTEXT},
+                    {"role": "user", "content": prompt},
+                ]
+                text = self._processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                inputs = self._processor(text=text, return_tensors="pt").to(self._model.device)
+            else:
+                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+
+            input_len = inputs["input_ids"].shape[-1]
             with torch.no_grad():
                 outputs = self._model.generate(
                     **inputs,
-                    max_length=min(2048, len(inputs["input_ids"][0]) + 1024),
+                    max_new_tokens=1024,
                     temperature=self.temperature,
                     top_p=0.95,
+                    top_k=64,
                     do_sample=True,
                     pad_token_id=self._tokenizer.eos_token_id,
                 )
-            response_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+            response_text = self._tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
             return response_text
         except Exception as exc:
             print(f"[GemmaClient] Local inference failed: {exc}")

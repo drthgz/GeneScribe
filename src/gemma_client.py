@@ -12,6 +12,7 @@ parsing for variant interpretation tasks.
 from __future__ import annotations
 
 import os
+import re
 import textwrap
 import time
 from pathlib import Path
@@ -154,6 +155,7 @@ class GemmaClient:
 
     DEFAULT_MODEL = "gemma-4-9b-it"
     KAGGLE_INPUT_PATHS = [
+        Path("/kaggle/input/models/google/gemma-4/transformers/gemma-4-e4b-it/1"),
         Path("/kaggle/input/gemma-4"),
         Path("/kaggle/input/gemma_4"),
         Path("/kaggle/input/google-gemma-4"),
@@ -273,9 +275,9 @@ class GemmaClient:
         if not has_cuda:
             weight_bytes = sum(f.stat().st_size for f in model_path.glob("*.safetensors"))
             if weight_bytes > 3_000_000_000:
-                raise RuntimeError(
-                    "Local Gemma weights are too large for CPU-only runtime. "
-                    "Use a GPU-enabled environment (Kaggle) or a smaller variant."
+                print(
+                    "[GemmaClient] Warning: Large local model on CPU-only runtime. "
+                    "Loading may be slow or may run out of memory."
                 )
 
         try:
@@ -422,7 +424,9 @@ class GemmaClient:
                     pad_token_id=self._tokenizer.eos_token_id,
                 )
             response_text = self._tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
-            return response_text
+            # Some local runs can still emit chat control tags; strip them for clean reports.
+            response_text = re.sub(r"<\/?\w+\|>", "", response_text)
+            return response_text.strip()
         except Exception as exc:
             print(f"[GemmaClient] Local inference failed: {exc}")
             return self._mock_response(prompt)

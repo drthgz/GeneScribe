@@ -204,8 +204,10 @@ class GenomicAnalyzer:
         model_name: str = GemmaClient.DEFAULT_MODEL,
         max_variants_to_interpret: int = 10,
         min_priority_score: float = 20.0,
+        client: GemmaClient | None = None,
     ) -> None:
-        self.client = GemmaClient(api_key=api_key, model_name=model_name)
+        # Reuse an existing client when provided to avoid reloading large local models.
+        self.client = client or GemmaClient(api_key=api_key, model_name=model_name)
         self.max_variants_to_interpret = max_variants_to_interpret
         self.min_priority_score = min_priority_score
 

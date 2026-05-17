@@ -19,9 +19,16 @@ Usage
 from __future__ import annotations
 
 import json
+import re
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+  import markdown as md
+except ImportError:  # pragma: no cover
+  md = None
 
 from .genomic_analyzer import AnalysisReport, VariantResult
 
@@ -37,8 +44,8 @@ _HTML_TEMPLATE = """\
   <title>GeneScribe Clinical Genomics Report</title>
   <style>
     :root {{
-      --primary: #2563eb;
-      --accent:  #7c3aed;
+      --primary: #1f4b8f;
+      --accent:  #2f6fca;
       --danger:  #dc2626;
       --warn:    #d97706;
       --ok:      #16a34a;
@@ -49,9 +56,12 @@ _HTML_TEMPLATE = """\
     }}
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }}
-    header {{ background: linear-gradient(135deg, var(--primary), var(--accent)); color: #fff; padding: 2rem; border-radius: 12px; margin-bottom: 2rem; }}
-    header h1 {{ font-size: 2rem; font-weight: 800; }}
-    header p {{ opacity: 0.85; margin-top: 0.5rem; }}
+    header {{ background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; box-shadow: 0 1px 2px rgba(0,0,0,.04); }}
+    .brand {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }}
+    .brand-logo {{ width: 52px; height: 52px; border-radius: 10px; border: 1px solid var(--border); background: #eef4ff; display: flex; align-items: center; justify-content: center; }}
+    .brand h1 {{ font-size: 1.45rem; font-weight: 800; color: var(--primary); }}
+    .brand p {{ margin-top: 0.2rem; color: #64748b; font-size: 0.92rem; }}
+    .meta {{ font-size: 0.9rem; color: #475569; margin-top: 0.4rem; }}
     .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
     .stat-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.06); }}
     .stat-card .number {{ font-size: 2.5rem; font-weight: 700; }}
@@ -69,20 +79,38 @@ _HTML_TEMPLATE = """\
     .badge-pathogenic {{ background: #fef2f2; color: var(--danger); border: 1px solid #fca5a5; }}
     .badge-vus {{ background: #eff6ff; color: var(--primary); border: 1px solid #93c5fd; }}
     .badge-benign {{ background: #f0fdf4; color: var(--ok); border: 1px solid #86efac; }}
-    .interp {{ background: #f8fafc; border-left: 4px solid var(--accent); padding: 0.75rem 1rem; margin-top: 0.75rem; border-radius: 0 6px 6px 0; white-space: pre-wrap; font-size: 0.9rem; line-height: 1.6; }}
+    .interp {{ background: #f8fafc; border-left: 4px solid var(--accent); padding: 0.75rem 1rem; margin-top: 0.75rem; border-radius: 0 6px 6px 0; font-size: 0.9rem; line-height: 1.6; }}
+    .interp h1, .interp h2, .interp h3, .interp h4 {{ margin: 0.35rem 0 0.45rem 0; font-size: 1.05rem; color: #1f4b8f; }}
+    .interp p {{ margin: 0.35rem 0; }}
+    .interp ul, .interp ol {{ margin: 0.35rem 0 0.35rem 1.25rem; }}
+    .interp code {{ background: #e2e8f0; border-radius: 4px; padding: 0.05rem 0.25rem; font-size: 0.85em; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
     th {{ background: var(--primary); color: #fff; padding: 0.6rem 0.8rem; text-align: left; }}
     td {{ padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); }}
     tr:hover td {{ background: #f1f5f9; }}
-    .score-bar {{ height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--ok), var(--warn), var(--danger)); }}
+    .refs li {{ margin-left: 1.2rem; margin-top: 0.4rem; line-height: 1.5; }}
     footer {{ text-align: center; color: #94a3b8; font-size: 0.8rem; margin-top: 2rem; }}
   </style>
 </head>
 <body>
   <header>
-    <h1>🧬 GeneScribe Clinical Genomics Report</h1>
-    <p>AI-Powered Variant Interpretation using Google Gemma 4 &nbsp;|&nbsp; Generated: {timestamp}</p>
-    <p style="margin-top:0.5rem; font-weight:600;">Patient Phenotypes: {phenotypes}</p>
+    <div class="brand">
+      <div class="brand-logo" aria-label="GeneScribe logo placeholder">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DNA placeholder logo">
+          <path d="M7 3C12 7 12 17 17 21" stroke="#1f4b8f" stroke-width="2" stroke-linecap="round"/>
+          <path d="M17 3C12 7 12 17 7 21" stroke="#2f6fca" stroke-width="2" stroke-linecap="round"/>
+          <path d="M9 7H15" stroke="#64748b" stroke-width="1.5"/>
+          <path d="M8.5 12H15.5" stroke="#64748b" stroke-width="1.5"/>
+          <path d="M9 17H15" stroke="#64748b" stroke-width="1.5"/>
+        </svg>
+      </div>
+      <div>
+        <h1>GeneScribe Clinical Genomics Report</h1>
+        <p>AI-assisted variant interpretation workflow</p>
+      </div>
+    </div>
+    <div class="meta">Generated: {timestamp}</div>
+    <div class="meta"><strong>Patient Phenotypes:</strong> {phenotypes}</div>
   </header>
 
   <!-- Stats -->
@@ -109,28 +137,42 @@ _HTML_TEMPLATE = """\
     </div>
   </div>
 
+  <!-- Full Variant Table -->
+  <div class="section">
+    <h2>Complete Variant Table</h2>
+    {variant_table}
+  </div>
+
   <!-- Cohort Summary -->
   <div class="section">
-    <h2>🤖 Gemma 4 Cohort Summary</h2>
+    <h2>Cohort Summary</h2>
     <div class="interp">{cohort_summary}</div>
   </div>
 
   <!-- Top Variants -->
   <div class="section">
-    <h2>🔬 Top Priority Variants</h2>
+    <h2>Top Priority Variants</h2>
     {variant_cards}
   </div>
 
   <!-- Pathway Analysis -->
   <div class="section">
-    <h2>🧪 Gene Pathway Analysis</h2>
+    <h2>Gene Pathway Analysis</h2>
     <div class="interp">{pathway_analysis}</div>
   </div>
 
-  <!-- Full Variant Table -->
+  <!-- Trial Information -->
   <div class="section">
-    <h2>📋 Complete Variant Table</h2>
-    {variant_table}
+    <h2>Trial Information</h2>
+    <div class="interp">{trial_information}</div>
+  </div>
+
+  <!-- References -->
+  <div class="section">
+    <h2>References</h2>
+    <ul class="refs">
+      {references_html}
+    </ul>
   </div>
 
   <footer>
@@ -198,6 +240,9 @@ class ReportGenerator:
         top_n = report.variant_results[:10]
         variant_cards = "".join(self._render_variant_card(vr) for vr in top_n)
         variant_table = self._render_variant_table(report.variant_results)
+        references_html = "\n".join(
+            f"<li>{_escape_html(ref)}</li>" for ref in self._build_references()
+        )
 
         return _HTML_TEMPLATE.format(
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -207,8 +252,10 @@ class ReportGenerator:
             pathogenic_count=report.pathogenic_count,
             vus_count=report.vus_count,
             rare_count=report.rare_count,
-            cohort_summary=_escape_html(report.cohort_summary),
-            pathway_analysis=_escape_html(report.pathway_analysis),
+          cohort_summary=_markdown_to_html(report.cohort_summary),
+          pathway_analysis=_markdown_to_html(report.pathway_analysis),
+          trial_information=_markdown_to_html(self._build_trial_information(report)),
+            references_html=references_html,
             variant_cards=variant_cards,
             variant_table=variant_table,
         )
@@ -240,7 +287,7 @@ class ReportGenerator:
         clinvar_badge = self._clinvar_badge(v.clinvar_sig)
         af_text = f"{v.af_gnomad:.4%}" if v.af_gnomad is not None else "Not in gnomAD"
         interp_html = (
-            f'<div class="interp">{_escape_html(vr.interpretation)}</div>'
+          f'<div class="interp">{_markdown_to_html(vr.interpretation)}</div>'
             if vr.interpretation
             else '<p style="color:#94a3b8; font-style:italic;">No AI interpretation generated for this variant.</p>'
         )
@@ -300,8 +347,10 @@ class ReportGenerator:
 
     def _render_markdown(self, report: AnalysisReport, phenotypes: str) -> str:
         lines: list[str] = []
-        lines.append("# 🧬 GeneScribe Clinical Genomics Report")
-        lines.append(f"> *Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | Powered by Google Gemma 4*\n")
+        lines.append("# GeneScribe Clinical Genomics Report")
+        lines.append(
+            f"> *Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | AI-assisted interpretation workflow*\n"
+        )
         lines.append(f"**Patient Phenotypes:** {phenotypes or 'Not specified'}")
         lines.append("")
 
@@ -316,13 +365,26 @@ class ReportGenerator:
         lines.append(f"| Rare Variants (AF < 1%) | {report.rare_count} |")
         lines.append("")
 
+        # Complete variant table
+        lines.append("## Complete Variant Table\n")
+        lines.append("| Position | Ref | Alt | Gene | Consequence | Impact | ClinVar | gnomAD AF | Priority |")
+        lines.append("|----------|-----|-----|------|-------------|--------|---------|-----------|----------|")
+        for vr in report.variant_results:
+            v = vr.variant
+            af_text = f"{v.af_gnomad:.4%}" if v.af_gnomad is not None else "-"
+            lines.append(
+                f"| {v.chrom}:{v.pos} | {v.ref} | {'/'.join(v.alt)} | {v.gene or '-'} | "
+                f"{v.consequence or '-'} | {v.impact or '-'} | {v.clinvar_sig or '-'} | {af_text} | {vr.priority_score:.0f} |"
+            )
+        lines.append("")
+
         # Cohort summary
-        lines.append("## 🤖 Gemma 4 Cohort Summary\n")
+        lines.append("## Cohort Summary\n")
         lines.append(report.cohort_summary)
         lines.append("")
 
         # Top variants
-        lines.append("## 🔬 Top Priority Variants\n")
+        lines.append("## Top Priority Variants\n")
         for i, vr in enumerate(report.variant_results[:10], 1):
             v = vr.variant
             alts = "/".join(v.alt)
@@ -339,14 +401,25 @@ class ReportGenerator:
                 lines.append(f"- **HGVS (protein):** `{v.hgvs_p}`")
             lines.append(f"- **Priority Score:** {vr.priority_score:.0f}")
             if vr.interpretation:
-                lines.append("\n**Gemma 4 Interpretation:**")
+                lines.append("\n**AI Interpretation:**")
                 lines.append("")
                 lines.append(vr.interpretation)
             lines.append("")
 
         # Pathway analysis
-        lines.append("## 🧪 Gene Pathway Analysis\n")
+        lines.append("## Gene Pathway Analysis\n")
         lines.append(report.pathway_analysis)
+        lines.append("")
+
+        # Trial information
+        lines.append("## Trial Information\n")
+        lines.append(self._build_trial_information(report))
+        lines.append("")
+
+        # References
+        lines.append("## References\n")
+        for ref in self._build_references():
+            lines.append(f"- {ref}")
         lines.append("")
 
         lines.append("---")
@@ -354,6 +427,25 @@ class ReportGenerator:
         lines.append("*Not a substitute for certified clinical laboratory interpretation.*")
 
         return "\n".join(lines)
+
+    def _build_trial_information(self, report: AnalysisReport) -> str:
+        genes = ", ".join(report.top_genes[:6]) if report.top_genes else "No high-priority genes identified"
+        return (
+            "This section is a pre-screening summary and not a trial enrollment decision. "
+            f"Priority genes for follow-up review: {genes}. "
+            "Recommended next steps: verify ACMG classification with a certified genetics team, "
+            "perform phenotype-to-genotype matching, and query ClinVar/ClinicalTrials.gov for currently recruiting studies."
+        )
+
+    @staticmethod
+    def _build_references() -> list[str]:
+        return [
+            "Richards S, et al. Standards and guidelines for the interpretation of sequence variants. Genet Med. 2015.",
+            "Riggs ER, et al. Technical standards for clinical interpretation of constitutional sequence variants (ACMG/AMP update). 2020+.",
+            "Landrum MJ, et al. ClinVar: improving access to variant interpretations and supporting evidence. Nucleic Acids Res.",
+            "Karczewski KJ, et al. The mutational constraint spectrum quantified from variation in 141,456 humans (gnomAD). Nature.",
+            "Google AI API documentation: model usage and safety guidance for Gemini/Gemma families.",
+        ]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -367,4 +459,71 @@ def _escape_html(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
         .replace("'", "&#39;")
+    )
+
+
+def _markdown_to_html(text: str) -> str:
+    """Render markdown-like model output into safe HTML for report blocks."""
+    cleaned = textwrap.dedent(text or "").strip("\n")
+    escaped = _escape_html(cleaned)
+    if md is None:
+        # Minimal dependency-free markdown rendering for headings/lists/paragraphs.
+        lines = escaped.splitlines()
+        out: list[str] = []
+        in_ol = False
+        in_ul = False
+
+        def close_lists() -> None:
+            nonlocal in_ol, in_ul
+            if in_ol:
+                out.append("</ol>")
+                in_ol = False
+            if in_ul:
+                out.append("</ul>")
+                in_ul = False
+
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                close_lists()
+                continue
+
+            m_h = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if m_h:
+                close_lists()
+                level = len(m_h.group(1))
+                out.append(f"<h{level}>{m_h.group(2)}</h{level}>")
+                continue
+
+            m_ol = re.match(r"^\d+\.\s+(.*)$", line)
+            if m_ol:
+                if in_ul:
+                    out.append("</ul>")
+                    in_ul = False
+                if not in_ol:
+                    out.append("<ol>")
+                    in_ol = True
+                out.append(f"<li>{m_ol.group(1)}</li>")
+                continue
+
+            m_ul = re.match(r"^[-*]\s+(.*)$", line)
+            if m_ul:
+                if in_ol:
+                    out.append("</ol>")
+                    in_ol = False
+                if not in_ul:
+                    out.append("<ul>")
+                    in_ul = True
+                out.append(f"<li>{m_ul.group(1)}</li>")
+                continue
+
+            close_lists()
+            out.append(f"<p>{line}</p>")
+
+        close_lists()
+        return "\n".join(out)
+
+    return md.markdown(
+        escaped,
+        extensions=["extra", "nl2br", "sane_lists"],
     )

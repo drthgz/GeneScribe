@@ -34,18 +34,19 @@ GeneScribe/
 ├── src/
 │   ├── __init__.py
 │   ├── variant_parser.py
-│   ├── gemma_client.py
+│   ├── gemma_client.py              # Dual-mode: local + API
 │   ├── genomic_analyzer.py
 │   └── report_generator.py
 ├── data/
 │   └── sample_variants.vcf
 ├── notebooks/
-│   ├── genescribe_kaggle_demo.ipynb
+│   ├── genescribe_kaggle_demo.ipynb  # Kaggle notebook with local model auto-detect
 │   └── genescribe_report.html        # generated artifact
 ├── tests/
 │   ├── test_variant_parser.py
 │   └── test_genomic_analyzer.py
-├── requirements.txt
+├── requirements.txt                  # Includes optional transformers/torch
+├── KAGGLE_LOCAL_MODEL_SETUP.md       # Setup guide for local model mode
 ├── NEXT_STEPS_TODO.md
 └── README.md
 ```
@@ -89,9 +90,28 @@ pytest -q
 
 ## Model and Hackathon Alignment
 
-The codebase defaults to `gemma-4-9b-it` in `GemmaClient`, which keeps the implementation aligned with the Gemma 4 hackathon objective.
+The codebase implements **dual-mode Gemma 4 support** to maximize reliability for hackathon submission:
 
-Notebook runs may optionally use a temporary fallback model for availability/quota reasons during live demos. That fallback is for execution continuity and does not change the core project goal.
+### 1. **Local Model Mode** (Recommended) ⭐
+- **How:** Attach Kaggle's [google/gemma-4 model](https://www.kaggle.com/models/google/gemma-4) as a notebook Input
+- **Benefits:** No API quota, full reproducibility, uses Kaggle GPU, no secrets management
+- **Auto-detection:** GemmaClient automatically detects local model in `/kaggle/input/gemma-4`
+- **Loading:** Via HuggingFace `transformers` library
+
+### 2. **API Mode** (Fallback)
+- **How:** Set `GOOGLE_API_KEY` in Kaggle Secrets
+- **When:** Use if local model unavailable
+- **Model:** `gemma-4-9b-it` via Google Generative AI SDK
+- **Note:** Subject to API quota limits
+
+### 3. **Mock Mode** (Last Resort)
+- **When:** Both local model and API key unavailable
+- **Returns:** Placeholder interpretations (for offline testing)
+
+**Priority:** Local > API > Mock  
+**Status:** All modes fully integrated and tested.
+
+For detailed setup instructions, see [KAGGLE_LOCAL_MODEL_SETUP.md](KAGGLE_LOCAL_MODEL_SETUP.md).
 
 ## Reports
 

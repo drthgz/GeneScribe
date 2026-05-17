@@ -1,6 +1,11 @@
 # Core AI / LLM
 google-generativeai>=0.8.0
 
+# Optional: For local Gemma 4 inference in Kaggle
+# Uncomment to use local model instead of API
+# torch>=2.0.0
+# transformers>=4.35.0
+
 # Data science
 pandas>=2.2.0
 numpy>=1.26.0

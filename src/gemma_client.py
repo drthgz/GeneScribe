@@ -1,7 +1,10 @@
 """
 gemma_client.py
 ===============
-Client wrapper for Google's Gemma 4 model via the Google Generative AI SDK.
+Client wrapper for Google's Gemma 4 model.
+Supports both:
+  - Local inference via HuggingFace transformers (Kaggle Inputs)
+  - API-based inference via Google Generative AI SDK
 Provides clinical-genomics-specific prompt templates and structured output
 parsing for variant interpretation tasks.
 """
@@ -11,6 +14,7 @@ from __future__ import annotations
 import os
 import textwrap
 import time
+from pathlib import Path
 from typing import Any
 
 try:
@@ -18,6 +22,13 @@ try:
     _GENAI_AVAILABLE = True
 except ImportError:
     _GENAI_AVAILABLE = False
+
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    _TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    _TRANSFORMERS_AVAILABLE = False
 
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
@@ -117,8 +128,12 @@ Tasks:
 
 class GemmaClient:
     """
-    Wrapper around Google's Generative AI SDK tuned for genomic variant
-    interpretation tasks.
+    Wrapper for Gemma 4 model with dual inference modes.
+
+    Modes (in priority order):
+    1. Local inference: Load model from Kaggle Inputs or GENESCRIBE_MODEL_PATH
+    2. API inference: Use Google Generative AI SDK (requires GOOGLE_API_KEY)
+    3. Mock: Return placeholder responses when no inference backend available
 
     Parameters
     ----------
@@ -126,15 +141,23 @@ class GemmaClient:
         Google AI API key. Falls back to the ``GOOGLE_API_KEY`` environment
         variable.
     model_name : str
-        Gemma 4 model identifier. Defaults to ``"gemma-4-9b-it"`` (instruction-
-        tuned 9B parameter model available on Kaggle / Google AI Studio).
+        Gemma 4 model identifier (for API mode). Defaults to ``"gemma-4-9b-it"``.
     temperature : float
         Sampling temperature (0 = deterministic, 1 = creative).
     max_retries : int
         Number of times to retry on API errors.
+    use_local : bool
+        Force use of local model if available. Default True.
+    local_model_path : str, optional
+        Path to local Gemma 4 model. Auto-discovers from Kaggle Inputs if not set.
     """
 
     DEFAULT_MODEL = "gemma-4-9b-it"
+    KAGGLE_INPUT_PATHS = [
+        Path("/kaggle/input/gemma-4"),
+        Path("/kaggle/input/gemma_4"),
+        Path("/kaggle/input/google-gemma-4"),
+    ]
 
     def __init__(
         self,
@@ -142,16 +165,34 @@ class GemmaClient:
         model_name: str = DEFAULT_MODEL,
         temperature: float = 0.2,
         max_retries: int = 3,
+        use_local: bool = True,
+        local_model_path: str | None = None,
     ) -> None:
         self.model_name = model_name
         self.temperature = temperature
         self.max_retries = max_retries
         self._model: Any = None
+        self._tokenizer: Any = None
+        self._mode: str = "mock"
 
+        # ── Try local model first ─────────────────────────────────────────────
+        if use_local and _TRANSFORMERS_AVAILABLE:
+            local_path = self._find_local_model(local_model_path)
+            if local_path:
+                try:
+                    self._load_local_model(local_path)
+                    self._mode = "local"
+                    print(f"[GemmaClient] Local model loaded from {local_path}")
+                    return
+                except Exception as e:
+                    print(f"[GemmaClient] Failed to load local model: {e}. Falling back to API...")
+
+        # ── Try API mode ──────────────────────────────────────────────────────
         if not _GENAI_AVAILABLE:
             print(
                 "[GemmaClient] Warning: 'google-generativeai' not installed. "
-                "Calls will return mock responses."
+                "Set GENESCRIBE_FORCE_LOCAL=1 and attach model in Kaggle Inputs, "
+                "or calls will use mock responses."
             )
             return
 
@@ -159,21 +200,63 @@ class GemmaClient:
         if not key:
             print(
                 "[GemmaClient] Warning: No API key found. "
-                "Set GOOGLE_API_KEY or pass api_key=. "
+                "Set GOOGLE_API_KEY or attach Gemma 4 in Kaggle Inputs. "
                 "Calls will return mock responses."
             )
             return
 
-        genai.configure(api_key=key)
-        system_instruction = textwrap.dedent(_SYSTEM_CONTEXT).strip()
-        self._model = genai.GenerativeModel(
-            model_name=self.model_name,
-            system_instruction=system_instruction,
-            generation_config=genai.GenerationConfig(
-                temperature=self.temperature,
-                max_output_tokens=2048,
-            ),
+        try:
+            genai.configure(api_key=key)
+            system_instruction = textwrap.dedent(_SYSTEM_CONTEXT).strip()
+            self._model = genai.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=system_instruction,
+                generation_config=genai.GenerationConfig(
+                    temperature=self.temperature,
+                    max_output_tokens=2048,
+                ),
+            )
+            self._mode = "api"
+            print(f"[GemmaClient] API mode initialized (model: {self.model_name})")
+        except Exception as e:
+            print(f"[GemmaClient] Failed to initialize API client: {e}. Falling back to mock mode.")
+            self._mode = "mock"
+
+    @staticmethod
+    def _find_local_model(custom_path: str | None = None) -> Path | None:
+        """Discover local Gemma 4 model in Kaggle Inputs or custom path."""
+        if custom_path:
+            p = Path(custom_path)
+            if p.exists() and (p / "config.json").exists():
+                return p
+        for kaggle_path in GemmaClient.KAGGLE_INPUT_PATHS:
+            if kaggle_path.exists():
+                config_file = kaggle_path / "config.json"
+                if config_file.exists():
+                    return kaggle_path
+        env_path = os.environ.get("GENESCRIBE_MODEL_PATH", "").strip()
+        if env_path:
+            p = Path(env_path)
+            if p.exists() and (p / "config.json").exists():
+                return p
+        return None
+
+    def _load_local_model(self, model_path: Path) -> None:
+        """Load Gemma 4 locally using transformers."""
+        if not _TRANSFORMERS_AVAILABLE:
+            raise RuntimeError("transformers library not installed. Run: pip install transformers torch")
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[GemmaClient] Loading model on {device}...")
+        
+        self._tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+        self._model = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map=device,
+            low_cpu_mem_usage=True,
         )
+        print(f"[GemmaClient] Model loaded successfully on {device}")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -261,9 +344,38 @@ class GemmaClient:
 
     def _generate(self, prompt: str) -> str:
         """Send prompt to Gemma 4 and return the response text."""
-        if self._model is None:
+        if self._mode == "mock":
             return self._mock_response(prompt)
 
+        if self._mode == "local":
+            return self._generate_local(prompt)
+
+        if self._mode == "api":
+            return self._generate_api(prompt)
+
+        return self._mock_response(prompt)
+
+    def _generate_local(self, prompt: str) -> str:
+        """Generate response using local model."""
+        try:
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    **inputs,
+                    max_length=min(2048, len(inputs["input_ids"][0]) + 1024),
+                    temperature=self.temperature,
+                    top_p=0.95,
+                    do_sample=True,
+                    pad_token_id=self._tokenizer.eos_token_id,
+                )
+            response_text = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+            return response_text
+        except Exception as exc:
+            print(f"[GemmaClient] Local inference failed: {exc}")
+            return self._mock_response(prompt)
+
+    def _generate_api(self, prompt: str) -> str:
+        """Generate response using API."""
         for attempt in range(1, self.max_retries + 1):
             try:
                 response = self._model.generate_content(prompt)

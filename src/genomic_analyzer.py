@@ -359,7 +359,7 @@ class GenomicAnalyzer:
                 f"Consequence: {v.consequence or 'N/A'} | "
                 f"Impact: {v.impact or 'N/A'} | "
                 f"ClinVar: {v.clinvar_sig or 'Not classified'} | "
-                f"AF: {v.af_gnomad or 'N/A'} | "
+                f"AF: {v.af_gnomad if v.af_gnomad is not None else 'N/A'} | "
                 f"Score: {vr.priority_score:.1f}"
             )
         return "\n".join(lines) if lines else "No high-priority variants identified."

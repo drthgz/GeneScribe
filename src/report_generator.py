@@ -246,7 +246,7 @@ class ReportGenerator:
 
         return _HTML_TEMPLATE.format(
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            phenotypes=phenotypes or "Not specified",
+          phenotypes=_escape_html(phenotypes or "Not specified"),
             total_variants=report.total_variants,
             high_impact=report.high_impact_count,
             pathogenic_count=report.pathogenic_count,
@@ -282,7 +282,14 @@ class ReportGenerator:
 
     def _render_variant_card(self, vr: VariantResult) -> str:
         v = vr.variant
-        alts = "/".join(v.alt)
+        chrom = _escape_html(v.chrom)
+        ref = _escape_html(v.ref)
+        alts = _escape_html("/".join(v.alt))
+        gene = _escape_html(v.gene or "Unknown")
+        consequence = _escape_html(v.consequence or "N/A")
+        genotype = _escape_html(v.genotype or "unknown")
+        hgvs_c = _escape_html(v.hgvs_c) if v.hgvs_c else ""
+        hgvs_p = _escape_html(v.hgvs_p) if v.hgvs_p else ""
         impact_badge = self._impact_badge(v.impact)
         clinvar_badge = self._clinvar_badge(v.clinvar_sig)
         af_text = f"{v.af_gnomad:.4%}" if v.af_gnomad is not None else "Not in gnomAD"
@@ -293,19 +300,19 @@ class ReportGenerator:
         )
         return f"""
         <div class="variant-card">
-          <strong>{v.chrom}:{v.pos} &nbsp; {v.ref} → {alts}</strong>
+          <strong>{chrom}:{v.pos} &nbsp; {ref} → {alts}</strong>
           &nbsp;&nbsp; {impact_badge} {clinvar_badge}
           <span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">
             Score: {vr.priority_score:.0f}
           </span>
           <br/>
           <small>
-            Gene: <strong>{v.gene or 'Unknown'}</strong> &nbsp;|&nbsp;
-            Consequence: {v.consequence or 'N/A'} &nbsp;|&nbsp;
+            Gene: <strong>{gene}</strong> &nbsp;|&nbsp;
+            Consequence: {consequence} &nbsp;|&nbsp;
             gnomAD AF: {af_text} &nbsp;|&nbsp;
-            Genotype: {v.genotype}
-            {f'&nbsp;|&nbsp; HGVS: {v.hgvs_c}' if v.hgvs_c else ''}
-            {f'&nbsp;|&nbsp; Protein: {v.hgvs_p}' if v.hgvs_p else ''}
+            Genotype: {genotype}
+            {f'&nbsp;|&nbsp; HGVS: {hgvs_c}' if hgvs_c else ''}
+            {f'&nbsp;|&nbsp; Protein: {hgvs_p}' if hgvs_p else ''}
           </small>
           {interp_html}
         </div>"""
@@ -314,17 +321,21 @@ class ReportGenerator:
         rows = []
         for vr in variant_results:
             v = vr.variant
-            alts = "/".join(v.alt)
+            chrom_pos = _escape_html(f"{v.chrom}:{v.pos}")
+            ref = _escape_html(v.ref)
+            alts = _escape_html("/".join(v.alt))
+            gene = _escape_html(v.gene or "—")
+            consequence = _escape_html(v.consequence or "—")
             af_text = f"{v.af_gnomad:.4%}" if v.af_gnomad is not None else "—"
             impact_badge = self._impact_badge(v.impact)
             clinvar_badge = self._clinvar_badge(v.clinvar_sig)
             rows.append(f"""
             <tr>
-              <td>{v.chrom}:{v.pos}</td>
-              <td>{v.ref}</td>
+              <td>{chrom_pos}</td>
+              <td>{ref}</td>
               <td>{alts}</td>
-              <td>{v.gene or '—'}</td>
-              <td>{v.consequence or '—'}</td>
+              <td>{gene}</td>
+              <td>{consequence}</td>
               <td>{impact_badge}</td>
               <td>{clinvar_badge}</td>
               <td>{af_text}</td>

@@ -4,7 +4,8 @@ gemma_client.py
 Client wrapper for Google's Gemma 4 model.
 Supports both:
   - Local inference via HuggingFace transformers (Kaggle Inputs)
-  - API-based inference via Google Generative AI SDK
+    - API-based inference via Google GenAI SDK (preferred)
+        with legacy google-generativeai fallback
 Provides clinical-genomics-specific prompt templates and structured output
 parsing for variant interpretation tasks.
 """
@@ -15,14 +16,9 @@ import os
 import re
 import textwrap
 import time
+import warnings
 from pathlib import Path
 from typing import Any
-
-try:
-    import google.generativeai as genai
-    _GENAI_AVAILABLE = True
-except ImportError:
-    _GENAI_AVAILABLE = False
 
 try:
     import torch
@@ -133,7 +129,7 @@ class GemmaClient:
 
     Modes (in priority order):
     1. Local inference: Load model from Kaggle Inputs or GENESCRIBE_MODEL_PATH
-    2. API inference: Use Google Generative AI SDK (requires GOOGLE_API_KEY)
+    2. API inference: Use Google GenAI SDK (requires GOOGLE_API_KEY)
     3. Mock: Return placeholder responses when no inference backend available
 
     Parameters
@@ -179,6 +175,9 @@ class GemmaClient:
         self._model: Any = None
         self._processor: Any = None
         self._tokenizer: Any = None
+        self._api_sdk: Any = None
+        self._api_client: Any = None
+        self._api_backend: str = "none"
         self._mode: str = "mock"
 
         # ── Try local model first ─────────────────────────────────────────────
@@ -194,14 +193,6 @@ class GemmaClient:
                     print(f"[GemmaClient] Failed to load local model: {e}. Falling back to API...")
 
         # ── Try API mode ──────────────────────────────────────────────────────
-        if not _GENAI_AVAILABLE:
-            print(
-                "[GemmaClient] Warning: 'google-generativeai' not installed. "
-                "Set GENESCRIBE_FORCE_LOCAL=1 and attach model in Kaggle Inputs, "
-                "or calls will use mock responses."
-            )
-            return
-
         key = api_key or os.environ.get("GOOGLE_API_KEY", "")
         if not key:
             print(
@@ -211,19 +202,49 @@ class GemmaClient:
             )
             return
 
+        # API backend priority:
+        # 1) google.genai (current)  2) google-generativeai (legacy fallback)
         try:
-            genai.configure(api_key=key)
+            from google import genai as genai_new  # type: ignore
+
+            self._api_client = genai_new.Client(api_key=key)
+            self._api_backend = "google_genai"
+            self._mode = "api"
+            print(f"[GemmaClient] API mode initialized via google.genai (model: {self.model_name})")
+            return
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[GemmaClient] google.genai init failed: {e}. Trying legacy SDK...")
+
+        try:
+            # Import legacy SDK only when actually needed.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                import google.generativeai as genai_legacy  # type: ignore
+            self._api_sdk = genai_legacy
+            self._api_backend = "google_generativeai"
+        except ImportError:
+            print(
+                "[GemmaClient] Warning: No supported Google API SDK found. "
+                "Install google-genai (preferred) or google-generativeai (legacy), "
+                "or continue with local model mode."
+            )
+            return
+
+        try:
+            self._api_sdk.configure(api_key=key)
             system_instruction = textwrap.dedent(_SYSTEM_CONTEXT).strip()
-            self._model = genai.GenerativeModel(
+            self._model = self._api_sdk.GenerativeModel(
                 model_name=self.model_name,
                 system_instruction=system_instruction,
-                generation_config=genai.GenerationConfig(
+                generation_config=self._api_sdk.GenerationConfig(
                     temperature=self.temperature,
                     max_output_tokens=2048,
                 ),
             )
             self._mode = "api"
-            print(f"[GemmaClient] API mode initialized (model: {self.model_name})")
+            print(f"[GemmaClient] API mode initialized via legacy SDK (model: {self.model_name})")
         except Exception as e:
             print(f"[GemmaClient] Failed to initialize API client: {e}. Falling back to mock mode.")
             self._mode = "mock"
@@ -424,6 +445,29 @@ class GemmaClient:
                     pad_token_id=self._tokenizer.eos_token_id,
                 )
             response_text = self._tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+
+            if self._processor is not None and hasattr(self._processor, "parse_response"):
+                try:
+                    parsed = self._processor.parse_response(response_text)
+                    if isinstance(parsed, str):
+                        response_text = parsed
+                    elif isinstance(parsed, dict):
+                        for key in (
+                            "final",
+                            "final_answer",
+                            "answer",
+                            "response",
+                            "text",
+                            "content",
+                        ):
+                            value = parsed.get(key)
+                            if isinstance(value, str) and value.strip():
+                                response_text = value
+                                break
+                except Exception:
+                    # Parsing is best-effort; raw decoded text is a safe fallback.
+                    pass
+
             # Some local runs can still emit chat control tags; strip them for clean reports.
             response_text = re.sub(r"<\/?\w+\|>", "", response_text)
             return response_text.strip()
@@ -435,6 +479,22 @@ class GemmaClient:
         """Generate response using API."""
         for attempt in range(1, self.max_retries + 1):
             try:
+                if self._api_backend == "google_genai":
+                    response = self._api_client.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt,
+                        config={
+                            "system_instruction": textwrap.dedent(_SYSTEM_CONTEXT).strip(),
+                            "temperature": self.temperature,
+                            "max_output_tokens": 2048,
+                        },
+                    )
+                    response_text = getattr(response, "text", None)
+                    if isinstance(response_text, str) and response_text.strip():
+                        return response_text
+                    return str(response)
+
+                # Legacy fallback path.
                 response = self._model.generate_content(prompt)
                 return response.text
             except Exception as exc:  # noqa: BLE001
